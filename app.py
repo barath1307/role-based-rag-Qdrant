@@ -1,4 +1,7 @@
 import os
+import hmac
+import json
+import bcrypt
 import streamlit as st
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -12,6 +15,37 @@ from qdrant_client.models import (
 from sentence_transformers import SentenceTransformer
 from huggingface_hub import InferenceClient
 
+# -----------------------------
+# User Authentication
+# -----------------------------
+USERS_FILE = "users.json"
+
+
+def load_users():
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def authenticate(username, password):
+    users = load_users()
+
+    user = users.get(username)
+
+    if not user:
+        return None
+
+    stored_hash = user["password_hash"].encode("utf-8")
+
+    if bcrypt.checkpw(
+        password.encode("utf-8"),
+        stored_hash
+    ):
+        return user["role"]
+
+    return None
 
 # -----------------------------
 # Page Configuration
@@ -22,8 +56,203 @@ st.set_page_config(
     layout="wide"
 )
 
+
+# -----------------------------
+# Authentication
+# -----------------------------
+
+
+def authenticate(username, password):
+    # Admin authentication
+    if username == st.secrets["ADMIN"]["username"]:
+        admin_hash = st.secrets["ADMIN"]["password_hash"]
+
+        if bcrypt.checkpw(
+            password.encode("utf-8"),
+            admin_hash.encode("utf-8")
+        ):
+            return "ADMIN"
+
+        return None
+
+    # Regular user authentication
+    users = load_users()
+
+    user = users.get(username)
+
+    if not user:
+        return None
+
+    stored_hash = user["password_hash"].encode("utf-8")
+
+    if bcrypt.checkpw(
+        password.encode("utf-8"),
+        stored_hash
+    ):
+        return user["role"]
+
+    return None
+
+
+# -----------------------------
+# Login Screen
+# -----------------------------
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if "user_role" not in st.session_state:
+    st.session_state.user_role = None
+
+if "username" not in st.session_state:
+    st.session_state.username = None
+
+
+if not st.session_state.authenticated:
+
+    st.title("🔐 Role-Based RAG System")
+    st.write("Sign in to access documents authorized for your role.")
+
+    with st.form("login_form"):
+
+        username = st.text_input(
+            "Username",
+            placeholder="Enter your username"
+        )
+
+        password = st.text_input(
+            "Password",
+            type="password",
+            placeholder="Enter your password"
+        )
+
+        login_button = st.form_submit_button("🔐 Login")
+
+        if login_button:
+
+            authenticated_role = authenticate(
+                username.strip(),
+                password
+            )
+
+            if authenticated_role:
+
+                st.session_state.authenticated = True
+                st.session_state.user_role = authenticated_role
+                st.session_state.username = username.strip()
+
+                st.rerun()
+
+            else:
+
+                st.error("Invalid username or password.")
+
+    st.stop()
+
+    # -----------------------------
+# Admin Panel
+# -----------------------------
+if st.session_state.user_role == "ADMIN":
+
+    st.title("🛠️ Admin Panel")
+    st.write("Create and manage authorized users.")
+
+    with st.form("create_user_form"):
+
+        new_username = st.text_input(
+            "Username",
+            placeholder="Example: engineer1"
+        )
+
+        new_password = st.text_input(
+            "Password",
+            type="password"
+        )
+
+        new_role = st.selectbox(
+            "Assign Role",
+            [
+                "CEO",
+                "Director",
+                "VP",
+                "Manager",
+                "TeamLead",
+                "SeniorEngineer",
+                "Engineer",
+                "Analyst",
+                "HR",
+                "Intern"
+            ]
+        )
+
+        create_user = st.form_submit_button(
+            "➕ Create User"
+        )
+
+        if create_user:
+
+            new_username = new_username.strip()
+
+            if not new_username or not new_password:
+                st.warning(
+                    "Username and password are required."
+                )
+
+            else:
+
+                users = load_users()
+
+                if new_username in users:
+
+                    st.error(
+                        "Username already exists."
+                    )
+
+                else:
+
+                    password_hash = bcrypt.hashpw(
+                        new_password.encode("utf-8"),
+                        bcrypt.gensalt()
+                    ).decode("utf-8")
+
+                    users[new_username] = {
+                        "password_hash": password_hash,
+                        "role": new_role
+                    }
+
+                    with open(
+                        USERS_FILE,
+                        "w",
+                        encoding="utf-8"
+                    ) as file:
+
+                        json.dump(
+                            users,
+                            file,
+                            indent=4
+                        )
+
+                    st.success(
+                        f"User '{new_username}' created successfully "
+                        f"with role '{new_role}'."
+                    )
+
+# -----------------------------
+# Logged-in User
+# -----------------------------
 st.title("🤖 Role-Based RAG System")
-st.write("Ask questions based on your authorized role and company documents.")
+
+st.write(
+    "Ask questions based on your authorized role and company documents."
+)
+
+role = st.session_state.user_role
+
+st.success(f"🔐 Authenticated Role: {role}")
+
+if st.button("Logout"):
+    st.session_state.authenticated = False
+    st.session_state.user_role = None
+    st.rerun()
 
 
 # -----------------------------
@@ -42,6 +271,7 @@ model = load_model()
 # -----------------------------
 @st.cache_resource
 def create_qdrant():
+
     client = QdrantClient(":memory:")
 
     collection_name = "company_docs"
@@ -68,21 +298,27 @@ def create_qdrant():
 
         # Handle different encodings
         try:
+
             with open(filepath, "r", encoding="utf-8") as file:
                 text = file.read()
 
         except UnicodeDecodeError:
 
             try:
+
                 with open(filepath, "r", encoding="utf-16") as file:
                     text = file.read()
 
             except UnicodeDecodeError:
 
-                with open(filepath, "r", encoding="utf-16-le") as file:
+                with open(
+                    filepath,
+                    "r",
+                    encoding="utf-16-le"
+                ) as file:
                     text = file.read()
 
-        role = filename.split("_")[0]
+        role_from_document = filename.split("_")[0]
 
         embedding = model.encode(text).tolist()
 
@@ -91,7 +327,7 @@ def create_qdrant():
                 id=point_id,
                 vector=embedding,
                 payload={
-                    "role": role,
+                    "role": role_from_document,
                     "text": text,
                     "filename": filename
                 }
@@ -127,28 +363,6 @@ llm = load_llm()
 
 
 # -----------------------------
-# Role Selection
-# -----------------------------
-roles = [
-    "CEO",
-    "Director",
-    "VP",
-    "Manager",
-    "TeamLead",
-    "SeniorEngineer",
-    "Engineer",
-    "Analyst",
-    "HR",
-    "Intern"
-]
-
-role = st.selectbox(
-    "Select your role",
-    roles
-)
-
-
-# -----------------------------
 # Question
 # -----------------------------
 question = st.text_input(
@@ -168,11 +382,15 @@ if st.button("🔍 Search"):
 
     else:
 
-        with st.spinner("Searching documents..."):
+        with st.spinner("Searching authorized documents..."):
 
             query_embedding = model.encode(question).tolist()
 
-            # Role-based filtering BEFORE semantic search
+            # IMPORTANT:
+            # Role authorization happens DURING vector retrieval.
+            # Unauthorized documents are excluded before they
+            # can enter the LLM context.
+
             results = client.query_points(
                 collection_name=collection_name,
                 query=query_embedding,
@@ -189,12 +407,15 @@ if st.button("🔍 Search"):
 
         if not results:
 
-            st.warning("No documents found for this role.")
+            st.warning(
+                "I could not find enough information "
+                "in the authorized documents."
+            )
 
         else:
 
             # -----------------------------
-            # Build Context
+            # Build Authorized Context
             # -----------------------------
             context = "\n\n".join(
                 [
@@ -212,12 +433,15 @@ if st.button("🔍 Search"):
                 prompt = f"""
 You are a company document assistant.
 
-The user's authorized role is: {role}
+The authenticated user's role is: {role}
 
-Answer the user's question ONLY using the provided documents.
+Answer the user's question ONLY using the authorized documents
+provided below.
 
 Do not invent information.
+
 If the documents do not contain enough information, say:
+
 "I could not find enough information in the authorized documents."
 
 User Question:
@@ -234,7 +458,10 @@ Authorized Documents:
                         messages=[
                             {
                                 "role": "system",
-                                "content": "You answer questions using only the provided company documents."
+                                "content": (
+                                    "You answer questions using only "
+                                    "the provided authorized company documents."
+                                )
                             },
                             {
                                 "role": "user",
@@ -250,23 +477,9 @@ Authorized Documents:
                     st.subheader("🤖 AI Answer")
                     st.write(answer)
 
-                    # -----------------------------
-                    # Retrieved Documents
-                    # -----------------------------
-                    with st.expander("📚 Retrieved Documents"):
-
-                        for result in results:
-
-                            st.markdown(
-                                f"**{result.payload['filename']}**"
-                            )
-
-                            st.write(
-                                result.payload["text"]
-                            )
-
-                            st.divider()
-
                 except Exception as e:
 
-                    st.error(f"AI generation error: {e}")
+                    st.error(
+                        "An error occurred while generating the AI answer."
+                    )
+                    st.error(str(e)) 
