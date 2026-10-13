@@ -12,7 +12,7 @@ from qdrant_client.models import (
 )
 
 from sentence_transformers import SentenceTransformer
-from huggingface_hub import InferenceClient
+from groq import Groq
 
 
 # ============================================================
@@ -237,12 +237,9 @@ client, collection_name = create_qdrant()
 
 @st.cache_resource
 def load_llm():
-
-    return InferenceClient(
-        api_key=st.secrets["HF_TOKEN"],
-        provider="auto"
+    return Groq(
+        api_key=st.secrets["GROQ_API_KEY"]
     )
-
 
 llm = load_llm()
 
@@ -380,26 +377,30 @@ Authorized Documents:
         try:
 
             response = llm.chat.completions.create(
-                model="deepseek-ai/DeepSeek-V3-0324",
-
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You answer questions using only "
-                            "the provided authorized company documents."
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-
-                max_tokens=300,
-
-                temperature=0.2
+    model="openai/gpt-oss-120b",
+    messages=[
+        {
+            "role": "system",
+            "content": (
+                "You are a company document assistant. "
+                "Answer using only the authorized documents "
+                "provided by the application. "
+                "Do not invent information."
             )
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ],
+    max_tokens=300,
+    temperature=0.2
+)
+
+answer = response.choices[0].message.content
+
+st.subheader("🤖 AI Answer")
+st.write(answer)
 
             answer = response.choices[0].message.content
 
